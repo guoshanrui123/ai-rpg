@@ -10,6 +10,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request, send_from_directory, session
 
+import game
 from keda import synthesize
 
 ROOT = Path(__file__).resolve().parent
@@ -56,7 +57,7 @@ def get_player():
         session["player_id"] = sid
         if len(sessions) >= MAX_SESSIONS:
             sessions.popitem(last=False)
-        sessions[sid] = {"history": [], "last_seen": now}
+        sessions[sid] = {"history": [], "last_seen": now, "game": game.new_game()}
     player = sessions[sid]
     player["last_seen"] = now
     sessions.move_to_end(sid)
@@ -78,7 +79,14 @@ def security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
-    if request.path in ("/send_message", "/get_messages") or request.path.startswith("/audio/"):
+    if request.path in (
+        "/send_message",
+        "/get_messages",
+        "/game_action",
+        "/roll",
+        "/reset_game",
+        "/gamestart",
+    ) or request.path.startswith("/audio/"):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -100,7 +108,9 @@ def characterselection():
 
 @app.route("/finalend")
 def finalend():
-    return render_template("1223finalend-try.html")
+    with state_lock:
+        ending = get_player()["game"]["ending"]
+    return render_template("1223finalend-try.html", ending=ending)
 
 
 @app.route("/chatpage")
@@ -109,8 +119,15 @@ def chatpage():
     if card not in ATTRIBUTES:
         abort(400)
     with state_lock:
-        get_player()
+        player = get_player()
+        mode = request.args.get("mode", session.get("mode", "demo"))
+        if mode not in ("demo", "ai"):
+            abort(400)
+        if session.get("card", card) != card or session.get("mode", mode) != mode:
+            player["history"] = []
+            player["game"] = game.new_game()
         session["card"] = card
+        session["mode"] = mode
     return render_template("chatpage-1227-try1.html", card=card)
 
 
@@ -177,6 +194,7 @@ class ChatBot:
         graph.add_edge(START, "agent")
         graph.add_edge("agent", END)
         self.graph = graph.compile()
+        self.game_context = {}
 
     def call_model(self, state):
         from langchain_core.messages import SystemMessage
@@ -187,6 +205,9 @@ class ChatBot:
             [
                 SystemMessage(content=SYSTEM_PROMPT),
                 SystemMessage(content=f"剧情资料：\n{context}"),
+                SystemMessage(
+                    content=f"当前玩家和服务器剧情状态：{self.game_context}。检定由玩家点击按钮后服务器处理，不要编造骰子结果。"
+                ),
                 *messages,
             ]
         )
@@ -221,37 +242,102 @@ def send_message():
     with state_lock:
         player = get_player()
         try:
-            if chatbot is None:
-                chatbot = ChatBot()
-            answer = apply_attribute_check(chatbot.stream(message, player["history"]), session.get("card", "1"))
+            card = session.get("card", "1")
+            if session.get("mode", "demo") == "demo":
+                action = game.interpret(player["game"], message)
+                answer = (
+                    game.act(player["game"], card, action)
+                    if action
+                    else (
+                        "请先掷骰子完成当前检定。"
+                        if player["game"]["pending"]
+                        else "这是预设剧情试玩。请选择下方行动，或输入相应行动，例如‘搜索书房’。自由对话需要选择 AI 模式。"
+                    )
+                )
+            else:
+                if chatbot is None:
+                    chatbot = ChatBot()
+                chatbot.game_context = {"card": card, "attributes": ATTRIBUTES[card], **game.view(player["game"], card)}
+                answer = chatbot.stream(message, player["history"])
             player["history"].extend([{"role": "user", "content": message}, {"role": "ai", "content": answer}])
             player["history"] = player["history"][-100:]
         except ConfigurationError as exc:
             return jsonify(status="error", message=str(exc)), 503
-        except Exception:
+        except Exception as exc:
             # SDK exceptions can include credentials, request URLs or private messages.
             app.logger.error("Chat request failed; upstream details omitted.")
-            return jsonify(status="error", message="AI 服务暂时不可用，请稍后重试。"), 502
+            reason = "AI 服务暂时不可用，请稍后重试。"
+            if getattr(exc, "status_code", None) == 401:
+                reason = "AI 服务密钥无效，请在本地 .env 更新凭据；也可以返回选人页选择剧情试玩。"
+            elif getattr(exc, "status_code", None) == 429:
+                reason = "AI 服务额度不足或请求受限，请检查服务账户余额；剧情试玩无需额度。"
+            return jsonify(status="error", message=reason), 502
         audio_url = None
         credentials = [os.getenv(name) for name in ("XFYUN_APP_ID", "XFYUN_API_KEY", "XFYUN_API_SECRET")]
-        if all(credentials):
+        if session.get("mode") == "ai" and all(credentials):
             try:
                 filename = synthesize(answer, ROOT / "runtime" / "audio" / session["player_id"], *credentials)
                 audio_url = f"/audio/{filename}"
             except Exception:
                 app.logger.warning("Speech synthesis failed; text response remains available.")
-        return jsonify(status="success", answer=answer, audio_url=audio_url)
+        return jsonify(status="success", answer=answer, audio_url=audio_url, game=game.view(player["game"], card))
+
+
+def save_turn(player, label, answer):
+    player["history"].extend([{"role": "user", "content": label}, {"role": "ai", "content": answer}])
+    player["history"] = player["history"][-100:]
+    return jsonify(
+        status="success", answer=answer, audio_url=None, game=game.view(player["game"], session.get("card", "1"))
+    )
+
+
+@app.post("/game_action")
+def game_action():
+    with state_lock:
+        player = get_player()
+        action = request.form.get("action", "")
+        labels = {key: label for key, label, _ in game.SCENES.get(player["game"]["scene"], [])}
+        try:
+            answer = game.act(player["game"], session.get("card", "1"), action)
+        except ValueError as exc:
+            return jsonify(status="error", message=str(exc)), 400
+        return save_turn(player, labels[action], answer)
+
+
+@app.post("/roll")
+def roll():
+    with state_lock:
+        player = get_player()
+        try:
+            answer = game.roll(player["game"])
+        except ValueError as exc:
+            return jsonify(status="error", message=str(exc)), 400
+        return save_turn(player, "掷骰子", answer)
+
+
+@app.post("/reset_game")
+def reset_game():
+    with state_lock:
+        player = get_player()
+        player["game"] = game.new_game()
+        player["history"] = [{"role": "ai", "content": game.OPENING}]
+        return jsonify(status="success", answer=game.OPENING, game=game.view(player["game"], session.get("card", "1")))
 
 
 @app.route("/get_messages")
 def get_messages():
     with state_lock:
-        return jsonify(chat_history=get_player()["history"])
+        player = get_player()
+        return jsonify(chat_history=player["history"], game=game.view(player["game"], session.get("card", "1")))
 
 
 @app.route("/gamestart")
 def gamestart():
-    return jsonify(message="你触发了与托马斯的对话。")
+    with state_lock:
+        player = get_player()
+        if not player["history"]:
+            player["history"].append({"role": "ai", "content": game.OPENING})
+        return jsonify(message=game.OPENING, game=game.view(player["game"], session.get("card", "1")))
 
 
 if __name__ == "__main__":

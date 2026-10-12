@@ -25,6 +25,10 @@
             <p id="characterselection-title">请选择你的人物卡</p>
         </div>
 
+        <div style="position:fixed;top:20%;left:30%;color:white;z-index:2">
+            <label for="game-mode">游戏模式：</label>
+            <select id="game-mode"><option value="demo">预设剧情试玩（无需密钥）</option><option value="ai">AI 自由对话（需有效凭据）</option></select>
+        </div>
         <div id="charactercard-all">
             <img id="card1" src="../images/charactercard1.png" alt="charactercard card1">
             <img id="card2" src="../images/charactercard2.png" alt="charactercard card2">
@@ -37,15 +41,15 @@
             var card2 = document.getElementById("card2");
             var card3 = document.getElementById("card3");
             card1.onclick = function () {
-                window.location.href = "/chatpage?card=1";
+                window.location.href = "/chatpage?card=1&mode=" + document.getElementById("game-mode").value;
             }
 
             card2.onclick = function () {
-                window.location.href = "/chatpage?card=2";
+                window.location.href = "/chatpage?card=2&mode=" + document.getElementById("game-mode").value;
             }
 
             card3.onclick = function () {
-                window.location.href = "/chatpage?card=3";
+                window.location.href = "/chatpage?card=3&mode=" + document.getElementById("game-mode").value;
             }
         </script>
 </body>

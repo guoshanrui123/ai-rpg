@@ -17,7 +17,7 @@ def reset(monkeypatch, tmp_path):
 
 
 def post(client, message="你好"):
-    client.get("/chatpage?card=1")
+    client.get("/chatpage?card=1&mode=ai")
     with client.session_transaction() as s:
         token = s["csrf_token"]
     return client.post("/send_message", data={"message": message}, headers={"X-CSRF-Token": token})

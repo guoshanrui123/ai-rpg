@@ -39,7 +39,7 @@ def test_real_graph_retrieval_and_history(monkeypatch, tmp_path):
     assert sent[1].content.startswith("剧情资料：\n")
     assert len(sent[1].content) > len("剧情资料：\n")
     assert sent[-1].content == "我想调查道格拉斯"
-    assert [item.type for item in sent] == ["system", "system", "human", "ai", "human"]
+    assert [item.type for item in sent] == ["system", "system", "system", "human", "ai", "human"]
     # Reopening the index must not duplicate the same story chunks.
     count = len(bot.db.get(include=[])["ids"])
     second = web.ChatBot()
