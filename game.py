@@ -1,5 +1,6 @@
 """Authoritative, authored story progression; no external model or keys required."""
 
+import re
 import secrets
 
 SKILLS = {"侦察": 36, "交涉": 45, "信用": 45, "图书馆使用": 60, "跑步": 23}
@@ -180,6 +181,10 @@ def roll(game):
 
 
 def interpret(game, message):
+    # Questions and negated plans must not spend a turn or choose an ending.
+    if re.search(r"[？?]|为什么|为何|怎么|是否|是什么|哪里|能否|吗$|告诉我|想知道|介绍|解释|说说", message):
+        return None
+    message = re.sub(r"(?:不要|不想|不去|别|不打算)[^，,。；;]*(?:[，,。；;]|$)", "", message)
     aliases = {
         "search": ("搜索", "书房", "日记"),
         "neighbor": ("邻居", "莱拉"),

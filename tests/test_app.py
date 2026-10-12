@@ -89,6 +89,7 @@ def test_card_attributes(monkeypatch):
 
 
 def test_speech_failure_keeps_answer(monkeypatch):
+    monkeypatch.setenv("ENABLE_TTS", "true")
     for name in ("XFYUN_APP_ID", "XFYUN_API_KEY", "XFYUN_API_SECRET"):
         monkeypatch.setenv(name, "test-placeholder")
     monkeypatch.setattr(web, "synthesize", Mock(side_effect=RuntimeError("private-speech-error")))
